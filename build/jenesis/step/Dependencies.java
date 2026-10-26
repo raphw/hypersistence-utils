@@ -30,7 +30,8 @@ public class Dependencies implements BuildExecutorModule {
             INTERNAL = "internal.properties",
             RESOLUTION = "resolution.properties",
             MODULAR = "modular.properties",
-            UNPINNED = "unpinned.properties";
+            UNPINNED = "unpinned.properties",
+            POMS = "poms.properties";
     public static final String RESOLVED = "resolved/", MODULAR_PATH = "modular/";
     public static final String RESOLVE = "resolve", PINNED = "pinned", SIGNATURES = "signatures";
     public static final Set<String> PROCESSOR_PATH = Set.of("javac", "plugin");
@@ -81,7 +82,7 @@ public class Dependencies implements BuildExecutorModule {
                          Consumer<String> printing,
                          Palette palette) {
         this.repositories = repositories;
-        this.resolvers = new LinkedHashMap<>(resolvers);
+        this.resolvers = resolvers;
         this.signatures = signatures;
         this.pinning = pinning;
         this.group = group;
@@ -181,7 +182,7 @@ public class Dependencies implements BuildExecutorModule {
                         Palette palette,
                         OffsetDateTime timestamp) {
             this.repositories = repositories;
-            this.resolvers = new LinkedHashMap<>(resolvers);
+            this.resolvers = resolvers;
             this.pinning = pinning;
             this.group = group;
             this.pathPlacement = pathPlacement;
@@ -192,15 +193,29 @@ public class Dependencies implements BuildExecutorModule {
 
         @Override
         public boolean shouldRun(SequencedMap<String, BuildStepArgument> arguments) throws IOException {
+            Map<String, Boolean> snapshots = new HashMap<>();
+            Set<String> internals = new HashSet<>();
             for (BuildStepArgument argument : arguments.values()) {
-                Path requires = argument.removed() ? null : argument.folder().resolve(REQUIRES);
-                if (requires != null && Files.isRegularFile(requires)) {
-                    SequencedProperties required = SequencedProperties.ofFiles(requires);
-                    for (String key : required.stringPropertyNames()) {
-                        if (key.endsWith("-SNAPSHOT") && required.getProperty(key).isEmpty()) {
-                            return true;
+                if (argument.removed()) {
+                    continue;
+                }
+                Path requires = argument.folder().resolve(REQUIRES), internal = argument.folder().resolve(INTERNAL);
+                if (Files.isRegularFile(requires)) {
+                    SequencedProperties.ofFiles(requires).forEachProperty((key, value) -> {
+                        if (key.endsWith("-SNAPSHOT") && (group == null || key.startsWith(group + "/"))) {
+                            snapshots.merge(key, value.isEmpty(), Boolean::logicalAnd);
                         }
-                    }
+                    });
+                }
+                if (Files.isRegularFile(internal)) {
+                    internals.addAll(SequencedProperties.ofFiles(internal).stringPropertyNames());
+                }
+            }
+            for (Map.Entry<String, Boolean> snapshot : snapshots.entrySet()) {
+                String key = snapshot.getKey();
+                int first = key.indexOf('/'), second = key.indexOf('/', first + 1);
+                if (snapshot.getValue() && !internals.contains(key.substring(second + 1))) {
+                    return true;
                 }
             }
             return arguments.values().stream().anyMatch(argument -> argument.hasChanged(
@@ -544,6 +559,7 @@ public class Dependencies implements BuildExecutorModule {
             }
             SequencedMap<String, SequencedMap<String, SequencedMap<String, String>>> managed = new LinkedHashMap<>();
             SequencedProperties unpinned = new SequencedProperties();
+            SequencedMap<String, Resolver.Resolved> poms = new TreeMap<>();
             if (!bomTokens.isEmpty()) {
                 SequencedMap<String, String> merged = new LinkedHashMap<>();
                 SequencedMap<String, String> covering = new LinkedHashMap<>();
@@ -610,6 +626,7 @@ public class Dependencies implements BuildExecutorModule {
                     if (bom.verifiable() && checksum.isEmpty() && !bom.internal()) {
                         unpinned.setProperty("bom/" + reference, "");
                     }
+                    bom.poms().forEach((key, pom) -> poms.putIfAbsent(group + "/" + key, pom));
                     if (!version.isEmpty() && !bom.version().isEmpty()) {
                         if (bom.verifiable()) {
                             resolvedBoms.setProperty("bom/" + reference + "/" + bom.version(),
@@ -831,6 +848,7 @@ public class Dependencies implements BuildExecutorModule {
                                 resolution = resolver.dependencies(executor, repo, wrapped, coordinates, bom, managedExcludes, intent);
                             }
                         }
+                        resolution.poms().forEach((key, value) -> poms.putIfAbsent(group + "/" + key, value));
                         for (Map.Entry<String, Resolver.Resolved> entry : resolution.artifacts().entrySet()) {
                             String coordinate = entry.getKey().substring(entry.getKey().indexOf('/') + 1);
                             String declared = repoEntry.getValue().get(coordinate);
@@ -1086,6 +1104,44 @@ public class Dependencies implements BuildExecutorModule {
                         && !pinnedFiles.contains(placed.get(entry.getKey()))) {
                     unpinned.setProperty(entry.getKey(), managing(managed, entry.getKey()));
                 }
+            }
+            SequencedMap<String, String> pomPins = new LinkedHashMap<>();
+            for (SequencedMap<String, SequencedMap<String, SequencedMap<String, String>>> pins : List.of(versions, managed)) {
+                for (SequencedMap<String, SequencedMap<String, String>> byRepository : pins.values()) {
+                    byRepository.forEach((repository, entries) -> entries.forEach((coordinate, value) -> {
+                        int space = value.indexOf(' ');
+                        if (!Resolver.pom(coordinate) || space < 0) {
+                            return;
+                        }
+                        String dependency = repository + "/" + coordinate, checksum = value.substring(space + 1).trim();
+                        String previous = pomPins.putIfAbsent(dependency, checksum);
+                        if (previous != null && !previous.equals(checksum)) {
+                            throw new IllegalStateException("Conflicting checksums pinned for "
+                                    + dependency + ": " + previous + " and " + checksum);
+                        }
+                    }));
+                }
+            }
+            SequencedProperties pomIndex = new SequencedProperties();
+            for (Map.Entry<String, Resolver.Resolved> entry : poms.entrySet()) {
+                if (entry.getValue().internal()) {
+                    continue;
+                }
+                String dependency = entry.getKey().substring(entry.getKey().indexOf('/') + 1);
+                String checksum = pomPins.get(dependency);
+                if (checksum == null) {
+                    unpinned.setProperty(dependency, "");
+                } else if (pinning != Pinning.VERSIONS && pinning != Pinning.IGNORE) {
+                    Resolver.validate(entry.getValue().file(), checksum, dependency);
+                }
+                String relative = context.next()
+                        .relativize(entry.getValue().file())
+                        .toString()
+                        .replace(File.separatorChar, '/');
+                pomIndex.setProperty(entry.getKey(), checksum == null ? relative : relative + " " + checksum);
+            }
+            if (!pomIndex.isEmpty()) {
+                pomIndex.store(context.next().resolve(POMS));
             }
             if (!unpinned.isEmpty()) {
                 unpinned.store(context.next().resolve(UNPINNED));
@@ -1945,7 +2001,8 @@ public class Dependencies implements BuildExecutorModule {
             result.put(groupScope, new Resolver.Resolution(
                     Collections.emptyNavigableMap(),
                     new ArrayList<>(edges.getOrDefault(groupScope, Collections.emptyNavigableSet())),
-                    vertices.getOrDefault(groupScope, Collections.emptyNavigableMap())));
+                    vertices.getOrDefault(groupScope, Collections.emptyNavigableMap()),
+                    Collections.emptyNavigableMap()));
         }
         return result;
     }
