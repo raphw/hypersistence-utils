@@ -68,12 +68,6 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <!-- Jenesis breaks nearest-wins ties the other way, so these keep it on the versions Maven resolves -->
-            <dependency>
-                <groupId>org.checkerframework</groupId>
-                <artifactId>checker-qual</artifactId>
-                <version>3.37.0</version>
-            </dependency>
         </dependencies>
     </dependencyManagement>
 

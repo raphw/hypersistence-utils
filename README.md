@@ -484,8 +484,7 @@ java build/jenesis/Make.java
 To test a single module, like `mvn -Ptest test -pl hypersistence-utils-hibernate-73`:
 
 ```shell
-java -Djenesis.make.profiles=test -Djenesis.print.tests=true build/jenesis/Make.java \
-     build/maven/compose/module/build-testmodule-hypersistence-utils-hibernate-73
+java -Djenesis.make.profiles=test -Djenesis.print.tests=true build/jenesis/Make.java +hypersistence-utils-hibernate-73
 ```
 
 To build without tests and install the jars into `~/.m2`, like `build-without-tests.bat`:
@@ -500,7 +499,7 @@ To run only the tests that a change can reach:
 java -Djenesis.test.incremental -Djenesis.make.profiles=test build/jenesis/Make.java
 ```
 
-The incremental selection can't see reflection, resources, or the classes an annotation names, like `@Type(JsonType.class)`, so it can skip a test that uses the changed Type. CI runs every test.
+The incremental selection follows the classes a test names, including those an annotation names, like `@Type(JsonType.class)`, but it can't see reflection or resources, so it can skip a test that reaches the change only that way. CI runs every test.
 
 Since Maven and Jenesis both write to `target/`, run the Maven build in a separate checkout (e.g., `git worktree add`) if you want to compare them.
 

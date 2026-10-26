@@ -37,4 +37,4 @@ jobs:
           -Djenesis.print.tests=true
           -Djenesis.executor.aggregate=true
           build/jenesis/Make.java
-          build/maven/compose/module/build-testmodule-hypersistence-utils-hibernate-${{ matrix.hibernate }}
+          +hypersistence-utils-hibernate-${{ matrix.hibernate }}
