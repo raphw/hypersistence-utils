@@ -496,7 +496,7 @@ java -Djenesis.test.skip=true build/jenesis/Make.java export
 To run only the tests that a change can reach:
 
 ```shell
-java -Djenesis.test.incremental -Djenesis.make.profiles=test build/jenesis/Make.java
+java -Djenesis.test.mode=incremental -Djenesis.make.profiles=test build/jenesis/Make.java
 ```
 
 The incremental selection follows the classes a test names, including those an annotation names, like `@Type(JsonType.class)`, but it can't see reflection or resources, so it can skip a test that reaches the change only that way. CI runs every test.

@@ -8,6 +8,7 @@ import build.jenesis.BuildStepContext;
 import build.jenesis.BuildStepResult;
 import build.jenesis.Environment;
 import build.jenesis.HashDigestFunction;
+import build.jenesis.Environment.Setting;
 import build.jenesis.Palette;
 import build.jenesis.Permits;
 import build.jenesis.Pinning;
@@ -30,6 +31,8 @@ public class PinModuleInfo implements BuildStep {
     private final boolean checksum;
     private final boolean flatten;
     private final Retain retain;
+    private final String exported;
+    private final SequencedSet<String> exportedGroups;
     private final transient Consumer<String> printing;
     private final transient Palette palette;
 
@@ -42,6 +45,8 @@ public class PinModuleInfo implements BuildStep {
                 true,
                 false,
                 Retain.GROUPS,
+                null,
+                new LinkedHashSet<>(List.of("main")),
                 Pinning.permits(),
                 null,
                 Palette.NONE);
@@ -58,7 +63,7 @@ public class PinModuleInfo implements BuildStep {
                 .retain(Retain.ofEnvironment(environment))
                 .permits(Pinning.permits(environment))
                 .platform(Platform.ofEnvironment(environment));
-        Boolean pins = environment.flagOrNull("print.pins");
+        Boolean pins = environment.flagOrNull("print.pins", Setting.PROJECT);
         return pins == null || !pins ? pin : pin.printing(environment.out(), Palette.ofEnvironment(environment));
     }
 
@@ -70,6 +75,8 @@ public class PinModuleInfo implements BuildStep {
                           boolean checksum,
                           boolean flatten,
                           Retain retain,
+                          String exported,
+                          SequencedSet<String> exportedGroups,
                           Permits permits,
                           Consumer<String> printing,
                           Palette palette) {
@@ -82,36 +89,46 @@ public class PinModuleInfo implements BuildStep {
         this.checksum = checksum;
         this.flatten = flatten;
         this.retain = retain;
+        this.exported = exported;
+        this.exportedGroups = exportedGroups;
         this.printing = printing;
         this.palette = palette;
     }
 
     public PinModuleInfo permits(Permits permits) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     public PinModuleInfo platform(Platform platform) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     public PinModuleInfo checksum(boolean checksum) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     public PinModuleInfo flatten(boolean flatten) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     public PinModuleInfo retain(Retain retain) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
+    }
+
+    public PinModuleInfo exported(String exported) {
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
+    }
+
+    public PinModuleInfo exportedGroups(SequencedSet<String> exportedGroups) {
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     public PinModuleInfo printing(Consumer<String> printing, Palette palette) {
-        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, permits, printing, palette);
+        return new PinModuleInfo(prefix, path, moduleInfoFiles, hashFunction, platform, checksum, flatten, retain, exported, exportedGroups, permits, printing, palette);
     }
 
     private static boolean checksumFrom(Environment environment) {
-        String value = environment.getProperty("pin.checksum");
+        String value = environment.getProperty("pin.checksum", Setting.PROJECT);
         if (value == null || value.equals("true")) {
             return true;
         }
@@ -122,7 +139,7 @@ public class PinModuleInfo implements BuildStep {
     }
 
     private static boolean flattenFrom(Environment environment) {
-        String value = environment.getProperty("pin.bom");
+        String value = environment.getProperty("pin.bom", Setting.PROJECT);
         if (value == null || value.equals("keep")) {
             return false;
         }
@@ -161,11 +178,28 @@ public class PinModuleInfo implements BuildStep {
 
     private CompletionStage<BuildStepResult> pin(SequencedMap<String, BuildStepArgument> arguments)
             throws IOException {
-        SequencedMap<String, Inventory.Dependency> closure = Inventory.closure(arguments.values(), path);
-        Set<String> internal = collectInternal(Inventory.identities(arguments.values()));
-        SequencedMap<String, String> entries = collectEntries(closure, internal, checksum ? hashFunction : null);
+        Inventory.Inventories inventories = Inventory.Inventories.read(arguments.values());
+        SequencedMap<String, Inventory.Dependency> closure = inventories.closure(path);
+        Set<String> skipped = new HashSet<>();
+        if (exported != null) {
+            for (String imported : inventories.bomImports(path)) {
+                int slash = imported.indexOf('/');
+                String group = imported.substring(0, slash);
+                if (imported.substring(slash + 1).equals(exported)
+                        && (exportedGroups.contains("*") || exportedGroups.contains(group))) {
+                    skipped.add(group);
+                }
+            }
+        }
+        SequencedMap<String, Inventory.Dependency> pinned = new LinkedHashMap<>(closure);
+        pinned.values().removeIf(dependency -> skipped.contains(dependency.group()));
+        Set<String> internal = collectInternal(inventories.identities());
+        SequencedMap<String, String> entries = collectEntries(pinned, internal, checksum ? hashFunction : null);
         if (checksum) {
-            for (Map.Entry<String, Inventory.Dependency> pom : Inventory.poms(arguments.values(), path).entrySet()) {
+            for (Map.Entry<String, Inventory.Dependency> pom : inventories.poms(path).entrySet()) {
+                if (skipped.contains(pom.getValue().group())) {
+                    continue;
+                }
                 String group = pom.getValue().group(), coordinate = pom.getKey().substring(group.length() + 1);
                 entries.putIfAbsent(group.equals("main") ? coordinate : pom.getKey(),
                         coordinate.substring(coordinate.lastIndexOf('/') + 1) + " " + pom.getValue().checksum(hashFunction));
@@ -174,7 +208,7 @@ public class PinModuleInfo implements BuildStep {
         Set<String> covered = new HashSet<>();
         SequencedMap<String, String> references = new LinkedHashMap<>();
         if (!flatten) {
-            SequencedMap<String, String> managed = Inventory.bomEntries(arguments.values(), path);
+            SequencedMap<String, String> managed = inventories.bomEntries(path);
             Iterator<Map.Entry<String, String>> it = entries.entrySet().iterator();
             while (it.hasNext()) {
                 Map.Entry<String, String> entry = it.next();
@@ -185,14 +219,14 @@ public class PinModuleInfo implements BuildStep {
                     it.remove();
                 }
             }
-            for (Map.Entry<String, Path> reference : Inventory.bomReferences(arguments.values(), path).entrySet()) {
+            for (Map.Entry<String, Path> reference : inventories.bomReferences(path).entrySet()) {
                 int lastSlash = reference.getKey().lastIndexOf('/');
                 String version = reference.getKey().substring(lastSlash + 1);
                 references.put(reference.getKey().substring(0, lastSlash), checksum
                         ? version + " " + hashFunction.encodedHash(reference.getValue())
                         : version);
             }
-            for (Map.Entry<String, String> reference : Inventory.bomVersions(arguments.values(), path).entrySet()) {
+            for (Map.Entry<String, String> reference : inventories.bomVersions(path).entrySet()) {
                 references.putIfAbsent(reference.getKey(), reference.getValue());
             }
         }
@@ -637,7 +671,7 @@ public class PinModuleInfo implements BuildStep {
         GROUPS, ALL, NONE;
 
         public static Retain ofEnvironment(Environment environment) {
-            String value = environment.value("pin.retain", "groups");
+            String value = environment.value("pin.retain", "groups", Setting.PROJECT);
             return switch (value) {
                 case "groups" -> GROUPS;
                 case "all" -> ALL;
